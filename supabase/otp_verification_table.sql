@@ -1,0 +1,2 @@
+-- The OTP table is now created/upgraded by supabase/schema.sql (safe to re-run).
+-- Run that file instead. Nothing to do here.
