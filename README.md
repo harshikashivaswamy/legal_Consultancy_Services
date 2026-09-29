@@ -1,3 +1,4 @@
+HEAD
 # Legal Consultancy Service
 
 A premium, production-quality responsive web application called "Legal Consultancy Service", an AI-powered legal consultation marketplace inspired by modern SaaS platforms.
@@ -378,3 +379,5 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+# legal_Consultancy_Services
+b098900780b0de868908e13e7c305fd0f11a0e7c
