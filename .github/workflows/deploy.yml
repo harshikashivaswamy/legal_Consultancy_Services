@@ -1,0 +1,119 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPO: legal-consultancy
+  SERVICE_NAME: legal-consultancy
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::676175359885:role/github-actions-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platform: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+            VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to ECS Express Mode
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest"
+          SERVICE_ARN="arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:service/default/$SERVICE_NAME"
+          SECRET_ARN="arn:aws:secretsmanager:ap-south-1:676175359885:secret:legal/prod-Wqphba"
+
+          cat > primary-container.json <<EOF
+          {
+            "image": "$IMAGE_URI",
+            "containerPort": 8080,
+            "environment": [
+              {"name": "NODE_ENV", "value": "production"},
+              {"name": "SUPABASE_URL", "value": "$VITE_SUPABASE_URL"},
+              {"name": "SUPABASE_ANON_KEY", "value": "$VITE_SUPABASE_ANON_KEY"},
+              {"name": "GMAIL_USER", "value": "harshikaharshi14@gmail.com"},
+              {"name": "GROQ_MODEL", "value": "llama-3.3-70b-versatile"}
+            ],
+            "secrets": [
+              {"name": "SUPABASE_SERVICE_ROLE_KEY", "valueFrom": "$SECRET_ARN:SUPABASE_SERVICE_ROLE_KEY::"},
+              {"name": "OTP_HMAC_SECRET", "valueFrom": "$SECRET_ARN:OTP_HMAC_SECRET::"},
+              {"name": "GMAIL_APP_PASS", "valueFrom": "$SECRET_ARN:GMAIL_APP_PASS::"}
+            ]
+          }
+          EOF
+
+          echo "Updating service with image: $IMAGE_URI"
+          cat primary-container.json
+
+          aws ecs update-express-gateway-service \
+            --region "$AWS_REGION" \
+            --service-arn "$SERVICE_ARN" \
+            --primary-container file://primary-container.json
+
+      - name: Monitor deployment
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          SERVICE_ARN="arn:aws:ecs:$AWS_REGION:$ACCOUNT_ID:service/default/$SERVICE_NAME"
+          timeout 600 aws ecs monitor-express-gateway-service \
+            --region "$AWS_REGION" \
+            --service-arn "$SERVICE_ARN" || true
+
+      - name: Health check
+        run: |
+          URL="https://le-de17cf07c8e1421a8304628b9f58db65.ecs.ap-south-1.on.aws"
+          echo "Waiting for deployment to become healthy..."
+          for i in $(seq 1 20); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/api/health?deep=1" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Deployment healthy: $(curl -s "$URL/api/health?deep=1")"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS - retrying in 15s"
+            sleep 15
+          done
+          echo "Deployment did not become healthy in time"
+          exit 1
